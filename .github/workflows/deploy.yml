@@ -9,7 +9,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/pricewise-api
+  IMAGE_NAME: ghcr.io/jeskrill/pricewise-api
 
 jobs:
   build:
