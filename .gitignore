@@ -1,0 +1,12 @@
+.env
+backend/.env
+
+backend/.venv/
+backend/debug_html/
+backend/.selenium_profile/
+backend/.patchright_profile/
+backend/.pw_profile_wb/
+
+.idea/
+.DS_Store
+__pycache__/
