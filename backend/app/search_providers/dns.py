@@ -10,6 +10,9 @@ from app.search_providers.shared import *  # noqa: F403
 
 class HttpDnsProvider(SearchProvider):
     name = "dns-shop.ru"
+    _CARD_SELECTOR = ".catalog-product, .catalog-product__root, [data-product-id], [data-id='product']"
+    _NAME_WAIT_SELECTOR = "a.catalog-product__name, a[href*='/product/'], [data-id='product']"
+    _PRICE_WAIT_SELECTOR = ".product-buy__price, .product-buy__price-wrap, .catalog-product__buy > *, .catalog-product__buy"
 
     async def search(self, query: str, limit: int) -> List[SearchItem]:
         source = "dns-shop.ru"
@@ -27,7 +30,7 @@ class HttpDnsProvider(SearchProvider):
             logger.error("%s: fetch failed: %s", self.name, err or "unknown")  # noqa: F405
             return []
 
-        items = self._parse_html(html, limit)
+        items = self._parse_html(html, limit, allow_unpriced=False)
         if items:
             logger.info("%s: parsed %s items (title=%r)", self.name, len(items), title)  # noqa: F405
             return items
@@ -49,7 +52,7 @@ class HttpDnsProvider(SearchProvider):
                 proxy_url="",
             )
             if html:
-                items = self._parse_html(html, limit)
+                items = self._parse_html(html, limit, allow_unpriced=False)
                 if items:
                     logger.info("%s: parsed %s items (title=%r)", self.name, len(items), title)  # noqa: F405
                     return items
@@ -65,29 +68,44 @@ class HttpDnsProvider(SearchProvider):
             html2, title2, final_url2, err2 = await _fetch_with_uc(  # noqa: F405
                 f"{self.name}:browser",
                 url,
-                wait_css="a.catalog-product__name, [data-id][data-product-id]",
+                wait_css=self._NAME_WAIT_SELECTOR,
                 wait_seconds=12,
+                scroll=True,
+                scroll_times=4,
+                scroll_pause=0.8,
             )
             if not html2 and err2:
                 logger.warning("%s: browser fetch failed: %s", self.name, err2)  # noqa: F405
 
             if html2:
                 html, title, final_url = html2, title2, final_url2
-                items = self._parse_html(html, limit)
+                items = self._parse_html(html, limit, allow_unpriced=False)
 
             if not items:
-                # Avito + DNS часто отличаются между headless/headful
-                logger.warning("%s: retrying browser with headless=False", self.name)  # noqa: F405
+                logger.warning("%s: retrying browser with delayed price wait", self.name)  # noqa: F405
                 html3, title3, final_url3, err3 = await _fetch_with_uc(  # noqa: F405
                     f"{self.name}:browser",
                     url,
-                    wait_css="a.catalog-product__name, [data-id][data-product-id]",
-                    wait_seconds=12,
+                    wait_css=self._PRICE_WAIT_SELECTOR,
+                    wait_seconds=18,
                     headless=False,
+                    scroll=True,
+                    scroll_times=6,
+                    scroll_pause=1.0,
                 )
                 if html3:
                     html, title, final_url = html3, title3, final_url3
-                    items = self._parse_html(html, limit)
+                    items = self._parse_html(html, limit, allow_unpriced=False)
+
+            if not items and html:
+                fallback_items = self._parse_html(html, limit, allow_unpriced=True)
+                if fallback_items:
+                    logger.warning(
+                        "%s: returning %s items without parsed price after browser fallback",
+                        self.name,
+                        len(fallback_items),
+                    )  # noqa: F405
+                    return fallback_items
 
         if items:
             logger.info("%s: parsed %s items (title=%r)", self.name, len(items), title)  # noqa: F405
@@ -106,7 +124,7 @@ class HttpDnsProvider(SearchProvider):
         )
         return []
 
-    def _parse_html(self, html: str, limit: int) -> List[SearchItem]:
+    def _parse_html(self, html: str, limit: int, allow_unpriced: bool) -> List[SearchItem]:
         ld = _extract_items_from_json_ld(  # noqa: F405
             html,
             base_url="https://www.dns-shop.ru",
@@ -121,7 +139,7 @@ class HttpDnsProvider(SearchProvider):
         soup = BeautifulSoup(html, "html.parser")
         items: List[SearchItem] = []
 
-        cards = soup.select(".catalog-product, .catalog-product__root, [data-product-id]")
+        cards = soup.select(self._CARD_SELECTOR)
         for card in cards:
             link = (
                 card.select_one("a.catalog-product__name[href]")
@@ -141,11 +159,12 @@ class HttpDnsProvider(SearchProvider):
                 card.select_one(".product-buy__price")
                 or card.select_one(".product-buy__price-wrap")
                 or card.select_one(".product-price__current")
+                or card.select_one(".catalog-product__price")
                 or card.find(string=lambda s: isinstance(s, str) and "₽" in s)
             )
             price_text = price_node.get_text(" ", strip=True) if hasattr(price_node, "get_text") else str(price_node)
             price = _normalize_price(_first_price(price_text))  # noqa: F405
-            if price <= 0:
+            if price <= 0 and not allow_unpriced:
                 continue
 
             img = card.select_one("img")

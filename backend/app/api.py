@@ -5,14 +5,26 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from .db import get_db
-from .repository import FavoritesRepository, MainRepository, SearchAnalyticsRepository, UserRepository
+from .repository import (
+    FavoritesRepository,
+    MainRepository,
+    ProductSnapshotRepository,
+    SearchAnalyticsRepository,
+    UserRepository,
+)
 from .schemas import (
     AuthResponse,
+    DeliveryContextOut,
+    DeliveryContextUpdateRequest,
     FavoriteCreateRequest,
     FavoriteOut,
     FavoritesResponse,
     LoginRequest,
     MerchantLogoUpdateRequest,
+    PasswordChangeRequest,
+    ProfileUpdateRequest,
+    ProductDetailsResponse,
+    ProductSpecOut,
     RecommendationsResponse,
     BannersResponse,
     MainScreenResponse,
@@ -27,9 +39,13 @@ from .schemas import (
     UserOut,
 )
 from .search_service import (
+    DeliveryContext,
     search_products as search_products_service,
+    find_cached_item,
     fetch_wb_popular,
+    SearchFilterOptions,
 )
+from .product_details import fetch_product_details
 from fastapi import HTTPException
 
 from .auth import (
@@ -59,6 +75,15 @@ _RECOMMENDATION_SOURCES = [
 def _recommendation_id(source: str, external_id: str) -> int:
     key = f"{source}:{external_id}".encode("utf-8")
     return zlib.crc32(key) & 0x7FFFFFFF
+
+
+def _user_delivery_context(user: Optional[models.User]) -> Optional[DeliveryContext]:
+    city = "Москва"
+    region = "Москва"
+    if user is not None:
+        city = (user.city or "").strip() or city
+        region = (user.region or "").strip() or region
+    return DeliveryContext(city=city, region=region)
 
 
 async def _dynamic_recommendations(
@@ -103,6 +128,7 @@ async def _dynamic_recommendations(
                 sources=_RECOMMENDATION_SOURCES,
                 per_source=True,
                 partial=True,
+                delivery_context=_user_delivery_context(user),
             )
         except Exception:
             continue
@@ -191,6 +217,67 @@ def login(
 @router.get("/me", response_model=UserOut, tags=["auth"])
 def me(user: models.User = Depends(get_current_user)):
     return UserOut.model_validate(user)
+
+
+@router.get("/profile", response_model=UserOut, tags=["profile"])
+def profile(user: models.User = Depends(get_current_user)):
+    return UserOut.model_validate(user)
+
+
+@router.put("/profile", response_model=UserOut, tags=["profile"])
+def update_profile(
+    req: ProfileUpdateRequest,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    repo = UserRepository(db)
+    updated = repo.update_profile(
+        user,
+        first_name=(req.first_name or "").strip() if req.first_name is not None else None,
+        last_name=(req.last_name or "").strip() if req.last_name is not None else None,
+        city=(req.city or "").strip() if req.city is not None else None,
+        region=(req.region or "").strip() if req.region is not None else None,
+        avatar_url=(req.avatar_url or "").strip() if req.avatar_url is not None else None,
+    )
+    return UserOut.model_validate(updated)
+
+
+@router.get("/delivery/context", response_model=DeliveryContextOut, tags=["delivery"])
+def get_delivery_context(user: models.User = Depends(get_current_user)):
+    return DeliveryContextOut(
+        city=(user.city or "").strip() or "Москва",
+        region=(user.region or "").strip() or "Москва",
+    )
+
+
+@router.put("/delivery/context", response_model=DeliveryContextOut, tags=["delivery"])
+def update_delivery_context(
+    req: DeliveryContextUpdateRequest,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    repo = UserRepository(db)
+    updated = repo.update_profile(
+        user,
+        city=req.city.strip(),
+        region=(req.region or "").strip() if req.region is not None else None,
+    )
+    return DeliveryContextOut(city=updated.city or "", region=updated.region or "")
+
+
+@router.put("/profile/password", tags=["profile"])
+def change_password(
+    req: PasswordChangeRequest,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if req.new_password != req.new_password_confirm:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    if not verify_password(req.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Invalid current password")
+    repo = UserRepository(db)
+    repo.set_password(user, hash_password(req.new_password))
+    return {"status": "ok"}
 
 
 @router.get("/main", response_model=MainScreenResponse)
@@ -339,6 +426,22 @@ async def search_products(
         True,
         description="Если true, возвращаем частичные результаты, не дожидаясь всех источников.",
     ),
+    sort: str = Query(
+        "price_asc",
+        description="Сортировка: price_asc | price_desc | relevance.",
+    ),
+    price_min: Optional[int] = Query(None, ge=0, description="Минимальная цена"),
+    price_max: Optional[int] = Query(None, ge=0, description="Максимальная цена"),
+    delivery: Optional[str] = Query(
+        None,
+        description="Фильтр доставки: today | today_tomorrow | up_to_7_days.",
+    ),
+    only_original: bool = Query(False, description="Только оригинальные товары (эвристика по источникам)."),
+    only_new: bool = Query(False, description="Только новые товары (эвристика по источникам/названию)."),
+    only_used: bool = Query(False, description="Только Б/У товары (эвристика по источникам/названию)."),
+    marketplace_only: bool = Query(False, description="Только маркетплейсы (эвристика по источникам)."),
+    offline_only: bool = Query(False, description="Только офлайн-магазины (эвристика по источникам)."),
+    pay_later_only: bool = Query(False, description="Только с рассрочкой (эвристика по источникам)."),
     sources: Optional[str] = Query(
         None,
         description=(
@@ -359,6 +462,18 @@ async def search_products(
             pass
 
     sources_list = [s.strip() for s in (sources or "").split(",") if s.strip()] or None
+    filters = SearchFilterOptions(
+        sort=sort,
+        price_min=price_min,
+        price_max=price_max,
+        delivery=delivery,
+        only_original=only_original,
+        only_new=only_new,
+        only_used=only_used,
+        marketplace_only=marketplace_only,
+        offline_only=offline_only,
+        pay_later_only=pay_later_only,
+    )
     items, has_more, meta = await search_products_service(
         q,
         offset=offset,
@@ -366,6 +481,8 @@ async def search_products(
         sources=sources_list,
         per_source=per_source,
         partial=partial,
+        filters=filters,
+        delivery_context=_user_delivery_context(user),
     )
 
     if offset == 0:
@@ -400,6 +517,9 @@ async def search_products(
                 product_url=item.product_url or "",
                 source=item.source,
                 merchant_logo_url=logo_url,
+                delivery_text=item.delivery_text or "",
+                delivery_days_min=item.delivery_days_min,
+                delivery_days_max=item.delivery_days_max,
                 is_favorite=is_fav,
             )
         )
@@ -408,6 +528,10 @@ async def search_products(
         next_offset = offset + (limit if per_source else len(out))
     else:
         next_offset = None
+    try:
+        ProductSnapshotRepository(db).upsert_from_search(items=out)
+    except Exception:
+        pass
     return SearchResponse(
         items=out,
         offset=offset,
@@ -435,6 +559,137 @@ def search_trending(
         repo = MainRepository(db)
         items = [SearchTrendingItemOut(query=q.query, count=0) for q in repo.get_popular_queries()[:limit]]
         return SearchTrendingResponse(items=items)
+
+
+@router.get("/product", response_model=ProductDetailsResponse)
+async def product_details(
+    source: str = Query(..., min_length=2, max_length=255, description="Источник товара"),
+    external_id: str = Query(..., min_length=1, max_length=255, description="Идентификатор товара"),
+    db: Session = Depends(get_db),
+    user: Optional[models.User] = Depends(get_current_user_optional),
+):
+    source_norm = source.strip().lower()
+    external_norm = external_id.strip()
+
+    item = await find_cached_item(source=source_norm, external_id=external_norm)
+    favorite_row = None
+    if user:
+        favorite_row = (
+            db.query(models.FavoriteProduct)
+            .filter(
+                models.FavoriteProduct.user_id == user.id,
+                models.FavoriteProduct.source == source_norm,
+                models.FavoriteProduct.external_id == external_norm,
+            )
+            .first()
+        )
+
+    rec_row = None
+    if item is None and favorite_row is None and external_norm.isdigit():
+        rec_id = int(external_norm)
+        rec_row = (
+            db.query(models.ProductRecommendation)
+            .join(models.ProductRecommendation.merchant)
+            .filter(models.ProductRecommendation.id == rec_id)
+            .first()
+        )
+        if rec_row and rec_row.merchant.name != source_norm:
+            rec_row = None
+
+    snapshot_row = None
+    if item is None and favorite_row is None and rec_row is None:
+        snapshot_row = ProductSnapshotRepository(db).get(source=source_norm, external_id=external_norm)
+
+    if item is None and favorite_row is None and rec_row is None and snapshot_row is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    merchant_logo_url = ""
+    if item and item.merchant_logo_url:
+        merchant_logo_url = item.merchant_logo_url
+    elif favorite_row and favorite_row.merchant_logo_url:
+        merchant_logo_url = favorite_row.merchant_logo_url
+    elif rec_row and rec_row.merchant and rec_row.merchant.logo_url:
+        merchant_logo_url = rec_row.merchant.logo_url
+    elif snapshot_row and snapshot_row.merchant_logo_url:
+        merchant_logo_url = snapshot_row.merchant_logo_url
+    else:
+        row = db.query(models.Merchant).filter(models.Merchant.name == source_norm).first()
+        merchant_logo_url = row.logo_url if row else ""
+
+    product_url = ""
+    if item and item.product_url:
+        product_url = item.product_url
+    elif favorite_row and favorite_row.product_url:
+        product_url = favorite_row.product_url
+    elif rec_row and rec_row.product_url:
+        product_url = rec_row.product_url
+    elif snapshot_row and snapshot_row.product_url:
+        product_url = snapshot_row.product_url
+
+    details = None
+    if product_url:
+        details = await fetch_product_details(product_url)
+    specs = [
+        ProductSpecOut(label=label, value=value)
+        for label, value in (details.specs if details else [])
+        if label and value
+    ]
+    description = details.description if details and details.description else ""
+
+    if item:
+        return ProductDetailsResponse(
+            id=str(item.id),
+            source=item.source,
+            title=item.title,
+            price=item.price,
+            thumbnail_url=item.thumbnail_url or "",
+            product_url=item.product_url or "",
+            merchant_logo_url=merchant_logo_url,
+            is_favorite=favorite_row is not None,
+            specs=specs,
+            description=description,
+        )
+
+    if favorite_row:
+        return ProductDetailsResponse(
+            id=favorite_row.external_id,
+            source=favorite_row.source,
+            title=favorite_row.title,
+            price=favorite_row.price,
+            thumbnail_url=favorite_row.thumbnail_url or "",
+            product_url=favorite_row.product_url or "",
+            merchant_logo_url=merchant_logo_url,
+            is_favorite=True,
+            specs=specs,
+            description=description,
+        )
+
+    if snapshot_row:
+        return ProductDetailsResponse(
+            id=snapshot_row.external_id,
+            source=snapshot_row.source,
+            title=snapshot_row.title,
+            price=snapshot_row.price,
+            thumbnail_url=snapshot_row.thumbnail_url or "",
+            product_url=snapshot_row.product_url or "",
+            merchant_logo_url=merchant_logo_url,
+            is_favorite=favorite_row is not None,
+            specs=specs,
+            description=description,
+        )
+
+    return ProductDetailsResponse(
+        id=str(rec_row.id),
+        source=rec_row.merchant.name if rec_row and rec_row.merchant else source_norm,
+        title=rec_row.title,
+        price=rec_row.price,
+        thumbnail_url=rec_row.thumbnail_url or "",
+        product_url=rec_row.product_url or "",
+        merchant_logo_url=merchant_logo_url,
+        is_favorite=favorite_row is not None,
+        specs=specs,
+        description=description,
+    )
 
 
 @router.get("/favorites", response_model=FavoritesResponse, tags=["favorites"])

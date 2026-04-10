@@ -60,6 +60,40 @@ MAX_CACHE_ITEMS = 200
 PER_SOURCE_LIMIT = 20
 SLOW_SOURCES_TIMEOUT_SECONDS = 8.0
 SLOW_SOURCES_TIMEOUT_SECONDS_PER_SOURCE = 60.0
+DEFAULT_DELIVERY_CITY = "Москва"
+DEFAULT_DELIVERY_REGION = "Москва"
+
+MARKETPLACE_SOURCES = {
+    "market.yandex.ru",
+    "aliexpress.ru",
+    "ozon.ru",
+    "wildberries.ru",
+    "cdek.shopping",
+    "avito.ru",
+}
+OFFLINE_SOURCES = {
+    "mvideo.ru",
+    "eldorado.ru",
+    "dns-shop.ru",
+    "citilink.ru",
+    "xcom-shop.ru",
+    "onlinetrade.ru",
+}
+TRUSTED_SOURCES = OFFLINE_SOURCES | {
+    "market.yandex.ru",
+    "ozon.ru",
+    "wildberries.ru",
+    "cdek.shopping",
+}
+INSTALLMENT_SOURCES = OFFLINE_SOURCES | {"ozon.ru"}
+FAST_DELIVERY_SOURCES = OFFLINE_SOURCES
+MEDIUM_DELIVERY_SOURCES = FAST_DELIVERY_SOURCES | {
+    "market.yandex.ru",
+    "ozon.ru",
+    "wildberries.ru",
+    "cdek.shopping",
+}
+SLOW_DELIVERY_SOURCES = {"aliexpress.ru"}
 
 _HTTP_CLIENTS: dict[str, httpx.AsyncClient] = {}
 _HTTP_CLIENT_LOCK = asyncio.Lock()
@@ -88,6 +122,20 @@ WB_API_ENDPOINTS = [
     "https://search.wb.ru/exactmatch/ru/common/v4/search",
 ]
 
+
+
+def _browser_profile_dir(profile_name: str) -> tuple[Path, Optional[tempfile.TemporaryDirectory[str]]]:
+    base_dir = (settings.browser_profile_dir or "").strip()
+    if settings.browser_profile_persistent:
+        if base_dir:
+            profile_dir = Path(base_dir) / profile_name
+        else:
+            profile_dir = Path(__file__).resolve().parents[1] / f".{profile_name}"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        return profile_dir, None
+
+    temp_dir = tempfile.TemporaryDirectory(prefix=f"prisewise_{profile_name}_")
+    return Path(temp_dir.name), temp_dir
 
 
 def _cooldown_active(source: str) -> bool:
@@ -1456,6 +1504,7 @@ async def _fetch_with_playwright_impl(
         label = "PR" if is_patchright else "PW"
         logger.info("%s: %s GET %s", provider, label, url)
         timeout_ms = int(max(5.0, min(float(settings.search_timeout_seconds), float(wait_seconds) + 10.0)) * 1000)
+        temp_profile_dir: Optional[tempfile.TemporaryDirectory[str]] = None
 
         try:
             stealth = Stealth() if Stealth is not None else None
@@ -1484,8 +1533,7 @@ async def _fetch_with_playwright_impl(
                 context = None
 
                 if is_patchright:
-                    profile_dir = Path(__file__).resolve().parents[1] / ".patchright_profile"
-                    profile_dir.mkdir(parents=True, exist_ok=True)
+                    profile_dir, temp_profile_dir = _browser_profile_dir("patchright_profile")
                     context = await p.chromium.launch_persistent_context(
                         user_data_dir=str(profile_dir),
                         channel="chrome",
@@ -1588,6 +1636,9 @@ async def _fetch_with_playwright_impl(
         except Exception as e:
             logger.error("%s: %s failed: %s: %s", provider, label, type(e).__name__, e)
             return None, None, None, f"{type(e).__name__}: {e}"
+        finally:
+            if temp_profile_dir is not None:
+                temp_profile_dir.cleanup()
 
 
 async def _fetch_with_playwright(
@@ -1693,6 +1744,7 @@ async def _fetch_with_patchright(
 @contextmanager
 def _uc_driver(*, headless: bool, provider: str):
     driver = None
+    temp_profile_dir: Optional[tempfile.TemporaryDirectory[str]] = None
 
     chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     if os.path.exists(chrome_bin):
@@ -1726,8 +1778,7 @@ def _uc_driver(*, headless: bool, provider: str):
             pass
 
         # стабильный профиль (куки/локалсторадж) — иногда помогает против антибота
-        profile_dir = Path(__file__).resolve().parents[1] / ".selenium_profile"
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir, temp_profile_dir = _browser_profile_dir("selenium_profile")
         options.add_argument(f"--user-data-dir={str(profile_dir)}")
 
         proxy = _selenium_proxy_for(provider)
@@ -1760,11 +1811,14 @@ def _uc_driver(*, headless: bool, provider: str):
                 driver.quit()
             except Exception:
                 pass
+        if temp_profile_dir is not None:
+            temp_profile_dir.cleanup()
 
 
 @contextmanager
 def _uc_undetected_driver(*, headless: bool, provider: str):
     driver = None
+    temp_profile_dir: Optional[tempfile.TemporaryDirectory[str]] = None
     try:
         import undetected_chromedriver as uc  # type: ignore
     except Exception as e:
@@ -1796,8 +1850,7 @@ def _uc_undetected_driver(*, headless: bool, provider: str):
         except Exception:
             pass
 
-        profile_dir = Path(__file__).resolve().parents[1] / ".selenium_profile"
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir, temp_profile_dir = _browser_profile_dir("selenium_profile")
         options.add_argument(f"--user-data-dir={str(profile_dir)}")
 
         proxy = _selenium_proxy_for(provider)
@@ -1833,6 +1886,8 @@ def _uc_undetected_driver(*, headless: bool, provider: str):
                 driver.quit()
             except Exception:
                 pass
+        if temp_profile_dir is not None:
+            temp_profile_dir.cleanup()
 
 
 def _fetch_sync(
@@ -2152,8 +2207,13 @@ def _clean_ali_title(text: str) -> str:
     return t
 
 
-def _cache_key(query: str, sources: List[str]) -> str:
-    return f"{_normalize_query(query)}|{','.join(sorted(sources))}"
+def _cache_key(query: str, sources: List[str], delivery_context: Optional["DeliveryContext"]) -> str:
+    city = DEFAULT_DELIVERY_CITY.lower()
+    region = DEFAULT_DELIVERY_REGION.lower()
+    if delivery_context is not None:
+        city = (delivery_context.city or "").strip().lower() or city
+        region = (delivery_context.region or "").strip().lower() or region
+    return f"{_normalize_query(query)}|{','.join(sorted(sources))}|{city}|{region}"
 
 
 def _item_key(item: SearchItem) -> str:
@@ -2195,6 +2255,33 @@ class SearchMeta:
     pending_sources: list[str]
 
 
+@dataclass(frozen=True)
+class DeliveryContext:
+    city: str
+    region: str
+
+
+_DELIVERY_TEXT_RE = re.compile(
+    r"(сегодня или завтра|сегодня|завтра|послезавтра|до\s+\d+\s+дн(?:я|ей)|"
+    r"через\s+\d+\s+дн(?:я|ей)|от\s+\d+\s+дн(?:я|ей)(?:\s+до\s+\d+\s+дн(?:я|ей))?)",
+    re.I,
+)
+
+
+@dataclass(frozen=True)
+class SearchFilterOptions:
+    sort: str = "price_asc"
+    price_min: Optional[int] = None
+    price_max: Optional[int] = None
+    delivery: Optional[str] = None
+    only_original: bool = False
+    only_new: bool = False
+    only_used: bool = False
+    marketplace_only: bool = False
+    offline_only: bool = False
+    pay_later_only: bool = False
+
+
 async def _get_cache_entry(key: str) -> SearchCacheEntry:
     async with _CACHE_LOCK:
         entry = _CACHE.get(key)
@@ -2213,6 +2300,203 @@ async def _get_cache_entry(key: str) -> SearchCacheEntry:
         return entry
 
 
+async def find_cached_item(*, source: str, external_id: str) -> Optional[SearchItem]:
+    source = (source or "").strip()
+    external_id = (external_id or "").strip()
+    if not source or not external_id:
+        return None
+
+    now = time.monotonic()
+    async with _CACHE_LOCK:
+        entries = list(_CACHE.values())
+
+    for entry in entries:
+        if entry.expires_at <= now:
+            continue
+        async with entry.lock:
+            for item in entry.items:
+                if item.source == source and str(item.id) == external_id:
+                    return item
+    return None
+
+
+def _normalize_delivery_text(text: str) -> str:
+    value = re.sub(r"\s+", " ", (text or "").strip())
+    return value[:80]
+
+
+def _delivery_days_from_text(text: str) -> tuple[Optional[int], Optional[int]]:
+    value = _normalize_delivery_text(text).lower()
+    if not value:
+        return None, None
+    if "сегодня или завтра" in value:
+        return 0, 1
+    if "послезавтра" in value:
+        return 2, 2
+    if "сегодня" in value:
+        return 0, 0
+    if "завтра" in value:
+        return 1, 1
+
+    match = re.search(r"до\s+(\d+)\s+дн(?:я|ей)", value)
+    if match:
+        return 0, int(match.group(1))
+
+    match = re.search(r"через\s+(\d+)\s+дн(?:я|ей)", value)
+    if match:
+        day = int(match.group(1))
+        return day, day
+
+    match = re.search(r"от\s+(\d+)\s+дн(?:я|ей)\s+до\s+(\d+)\s+дн(?:я|ей)", value)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+
+    match = re.search(r"от\s+(\d+)\s+дн(?:я|ей)", value)
+    if match:
+        return int(match.group(1)), None
+
+    return None, None
+
+
+def _extract_delivery_text(text: str) -> str:
+    cleaned = _normalize_delivery_text(text)
+    if not cleaned:
+        return ""
+    match = _DELIVERY_TEXT_RE.search(cleaned)
+    if not match:
+        return ""
+    return _normalize_delivery_text(match.group(1))
+
+
+def _extract_delivery_text_from_obj(obj: object) -> str:
+    stack: list[object] = [obj]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            value = _extract_delivery_text(current)
+            if value:
+                return value
+            continue
+        if isinstance(current, dict):
+            for value in current.values():
+                stack.append(value)
+            continue
+        if isinstance(current, list):
+            for value in current:
+                stack.append(value)
+    return ""
+
+
+def _normalize_filters(filters: Optional[SearchFilterOptions]) -> SearchFilterOptions:
+    if filters is None:
+        return SearchFilterOptions()
+    sort = (filters.sort or "price_asc").strip().lower()
+    if sort not in {"price_asc", "price_desc", "relevance"}:
+        sort = "price_asc"
+    delivery = (filters.delivery or "").strip().lower()
+    if delivery not in {"today", "today_tomorrow", "up_to_7_days"}:
+        delivery = None
+    price_min = filters.price_min if filters.price_min is not None and filters.price_min >= 0 else None
+    price_max = filters.price_max if filters.price_max is not None and filters.price_max >= 0 else None
+    if price_min is not None and price_max is not None and price_min > price_max:
+        price_min, price_max = price_max, price_min
+    only_new = filters.only_new and not filters.only_used
+    only_used = filters.only_used and not filters.only_new
+    marketplace_only = filters.marketplace_only and not filters.offline_only
+    offline_only = filters.offline_only and not filters.marketplace_only
+    return SearchFilterOptions(
+        sort=sort,
+        price_min=price_min,
+        price_max=price_max,
+        delivery=delivery,
+        only_original=filters.only_original,
+        only_new=only_new,
+        only_used=only_used,
+        marketplace_only=marketplace_only,
+        offline_only=offline_only,
+        pay_later_only=filters.pay_later_only,
+    )
+
+
+def _looks_used(item: SearchItem) -> bool:
+    if item.source in {"avito.ru"}:
+        return True
+    title = (item.title or "").lower()
+    return any(
+        marker in title
+        for marker in ("б/у", " бу ", "бу.", "used", "уцен", "refurb", "восстанов")
+    )
+
+
+def _apply_filters(items: List[SearchItem], filters: SearchFilterOptions) -> List[SearchItem]:
+    if not items:
+        return []
+    filtered: list[SearchItem] = []
+    for item in items:
+        price = item.price or 0
+        if filters.price_min is not None or filters.price_max is not None:
+            if price <= 0:
+                continue
+            if filters.price_min is not None and price < filters.price_min:
+                continue
+            if filters.price_max is not None and price > filters.price_max:
+                continue
+        if filters.marketplace_only and item.source not in MARKETPLACE_SOURCES:
+            continue
+        if filters.offline_only and item.source not in OFFLINE_SOURCES:
+            continue
+        if filters.only_original and item.source not in TRUSTED_SOURCES:
+            continue
+        if filters.only_used and not _looks_used(item):
+            continue
+        if filters.only_new and _looks_used(item):
+            continue
+        if filters.pay_later_only and item.source not in INSTALLMENT_SOURCES:
+            continue
+        if filters.delivery:
+            max_days = item.delivery_days_max
+            if filters.delivery == "today":
+                if max_days is not None:
+                    if max_days > 0:
+                        continue
+                elif item.source not in FAST_DELIVERY_SOURCES:
+                    continue
+            if filters.delivery == "today_tomorrow":
+                if max_days is not None:
+                    if max_days > 1:
+                        continue
+                elif item.source not in MEDIUM_DELIVERY_SOURCES:
+                    continue
+            if filters.delivery == "up_to_7_days":
+                if max_days is not None:
+                    if max_days > 7:
+                        continue
+                elif item.source in SLOW_DELIVERY_SOURCES:
+                    continue
+        filtered.append(item)
+    return filtered
+
+
+def _sort_items(items: List[SearchItem], sort: str, tokens: List[str]) -> List[SearchItem]:
+    if not items:
+        return []
+    if sort == "relevance":
+        return sorted(
+            items,
+            key=lambda x: (
+                -_query_hit_count(x.title, tokens),
+                x.price if x.price else 1_000_000_000,
+                x.source,
+                x.id,
+            ),
+        )
+    priced = [item for item in items if item.price and item.price > 0]
+    unpriced = [item for item in items if not item.price or item.price <= 0]
+    reverse = sort == "price_desc"
+    priced.sort(key=lambda x: x.price, reverse=reverse)
+    return priced + unpriced
+
+
 async def search_products(
     query: str,
     *,
@@ -2221,12 +2505,14 @@ async def search_products(
     sources: Optional[List[str]] = None,
     per_source: bool = False,
     partial: bool = False,
+    filters: Optional[SearchFilterOptions] = None,
+    delivery_context: Optional[DeliveryContext] = None,
 ) -> Tuple[List[SearchItem], bool, SearchMeta]:
     explicit_sources = sources is not None
     sources_n = _normalize_sources(sources)
     if not explicit_sources and len(sources_n) > 1:
         explicit_sources = True
-    key = _cache_key(query, sources_n)
+    key = _cache_key(query, sources_n, delivery_context)
     entry = await _get_cache_entry(key)
 
     async with entry.lock:
@@ -2264,6 +2550,10 @@ async def search_products(
         )
         entry.items.sort(key=lambda x: (x.price if x.price else 1_000_000_000, x.source, x.id))
 
+        filter_opts = _normalize_filters(filters)
+        tokens = _query_tokens(query)
+        filtered_items = _apply_filters(entry.items, filter_opts)
+
         pending_sources = sorted(entry.pending_sources)
         total_sources = len(sources_n)
         checked_sources = max(0, total_sources - len(pending_sources))
@@ -2275,7 +2565,7 @@ async def search_products(
 
         if per_source:
             grouped: dict[str, list[SearchItem]] = {src: [] for src in sources_n}
-            for item in entry.items:
+            for item in filtered_items:
                 if item.source in grouped:
                     grouped[item.source].append(item)
 
@@ -2283,6 +2573,7 @@ async def search_products(
             has_more = False
             for src in sources_n:
                 items_for_src = grouped.get(src, [])
+                items_for_src = _sort_items(items_for_src, filter_opts.sort, tokens)
                 if len(items_for_src) >= offset + limit:
                     has_more = True
                 page_items.extend(items_for_src[offset : offset + limit])
@@ -2294,10 +2585,11 @@ async def search_products(
                 has_more = True
             if partial and entry.pending_sources:
                 has_more = True
-            page_items.sort(key=lambda x: (x.price if x.price else 1_000_000_000, x.source, x.id))
+            page_items = _sort_items(page_items, filter_opts.sort, tokens)
             return page_items, has_more, meta
 
-        page_items = entry.items[offset : offset + limit]
+        sorted_items = _sort_items(filtered_items, filter_opts.sort, tokens)
+        page_items = sorted_items[offset : offset + limit]
         has_more = False
         if (
             "market.yandex.ru" in sources_n
@@ -2305,7 +2597,7 @@ async def search_products(
             and entry.yandex_next_page <= YANDEX_MAX_PAGES
         ):
             has_more = True
-        if offset + len(page_items) < len(entry.items):
+        if offset + len(page_items) < len(sorted_items):
             has_more = True
         if partial and entry.pending_sources:
             has_more = True

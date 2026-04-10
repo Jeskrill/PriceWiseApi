@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -12,6 +12,9 @@ class SearchItem:
     merchant_name: str
     merchant_logo_url: str
     source: str
+    delivery_text: str = ""
+    delivery_days_min: Optional[int] = None
+    delivery_days_max: Optional[int] = None
 
 
 class SearchProvider:

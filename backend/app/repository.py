@@ -186,8 +186,43 @@ class UserRepository:
         return self.db.query(models.User).filter(models.User.email == email).first()
 
     def create_user(self, email: str, password_hash: str) -> models.User:
-        user = models.User(email=email, password_hash=password_hash)
+        user = models.User(
+            email=email,
+            password_hash=password_hash,
+            city="Москва",
+            region="Москва",
+        )
         self.db.add(user)
+        self.db.commit()
+        self.db.refresh(user)
+        return user
+
+    def update_profile(
+        self,
+        user: models.User,
+        *,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+        city: Optional[str] = None,
+        region: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+    ) -> models.User:
+        if first_name is not None:
+            user.first_name = first_name
+        if last_name is not None:
+            user.last_name = last_name
+        if city is not None:
+            user.city = city
+        if region is not None:
+            user.region = region
+        if avatar_url is not None:
+            user.avatar_url = avatar_url
+        self.db.commit()
+        self.db.refresh(user)
+        return user
+
+    def set_password(self, user: models.User, password_hash: str) -> models.User:
+        user.password_hash = password_hash
         self.db.commit()
         self.db.refresh(user)
         return user
@@ -376,3 +411,59 @@ class SearchAnalyticsRepository:
         )
         rows = self.db.execute(stmt, {"days": days, "limit": limit, "like": like}).all()
         return [str(r.query) for r in rows if r.query]
+
+
+class ProductSnapshotRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert_from_search(self, *, items: list) -> int:
+        if not items:
+            return 0
+        updated = 0
+        for item in items:
+            source = (getattr(item, "source", "") or "").strip()
+            external_id = (getattr(item, "id", "") or "").strip()
+            title = (getattr(item, "title", "") or "").strip()
+            if not source or not external_id or not title:
+                continue
+
+            row = (
+                self.db.query(models.ProductSnapshot)
+                .filter(
+                    models.ProductSnapshot.source == source,
+                    models.ProductSnapshot.external_id == external_id,
+                )
+                .first()
+            )
+            if row is None:
+                row = models.ProductSnapshot(
+                    source=source,
+                    external_id=external_id,
+                    title=title,
+                    price=int(getattr(item, "price", 0) or 0),
+                    thumbnail_url=getattr(item, "thumbnail_url", "") or "",
+                    product_url=getattr(item, "product_url", "") or "",
+                    merchant_logo_url=getattr(item, "merchant_logo_url", "") or "",
+                )
+                self.db.add(row)
+            else:
+                row.title = title
+                row.price = int(getattr(item, "price", 0) or 0)
+                row.thumbnail_url = getattr(item, "thumbnail_url", "") or ""
+                row.product_url = getattr(item, "product_url", "") or ""
+                row.merchant_logo_url = getattr(item, "merchant_logo_url", "") or ""
+            updated += 1
+        if updated:
+            self.db.commit()
+        return updated
+
+    def get(self, *, source: str, external_id: str) -> Optional[models.ProductSnapshot]:
+        return (
+            self.db.query(models.ProductSnapshot)
+            .filter(
+                models.ProductSnapshot.source == source,
+                models.ProductSnapshot.external_id == external_id,
+            )
+            .first()
+        )

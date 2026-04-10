@@ -106,6 +106,8 @@ class UCWildberriesProvider(SearchProvider):
             price = _normalize_price(price)  # noqa: F405
             if price <= 0:
                 continue
+            delivery_text = _extract_delivery_text_from_obj(p)  # noqa: F405
+            delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
 
             vol = pid // 100000
             part = pid // 1000
@@ -122,6 +124,9 @@ class UCWildberriesProvider(SearchProvider):
                     merchant_name="wildberries.ru",
                     merchant_logo_url="",
                     source="wildberries.ru",
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:
@@ -232,6 +237,8 @@ class UCWildberriesProvider(SearchProvider):
             price = _normalize_price(price)  # noqa: F405
             if price <= 0 or price > 1_000_000:
                 continue
+            delivery_text = _extract_delivery_text(card.get_text(" ", strip=True))  # noqa: F405
+            delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
 
             img = card.select_one("img")
             thumb = _img_url(img)  # noqa: F405
@@ -246,6 +253,9 @@ class UCWildberriesProvider(SearchProvider):
                     merchant_name="wildberries.ru",
                     merchant_logo_url="",
                     source="wildberries.ru",
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:

@@ -54,6 +54,11 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    first_name: Mapped[str] = mapped_column(String(255), nullable=True, default="")
+    last_name: Mapped[str] = mapped_column(String(255), nullable=True, default="")
+    city: Mapped[str] = mapped_column(String(255), nullable=True, default="")
+    region: Mapped[str] = mapped_column(String(255), nullable=True, default="")
+    avatar_url: Mapped[str] = mapped_column(String(1024), nullable=True, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     tokens: Mapped[list["AuthToken"]] = relationship("AuthToken", back_populates="user", cascade="all, delete-orphan")
@@ -105,3 +110,23 @@ class SearchEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user: Mapped[Optional[User]] = relationship("User")
+
+
+class ProductSnapshot(Base):
+    __tablename__ = "product_snapshots"
+    __table_args__ = (UniqueConstraint("source", "external_id", name="uq_product_snapshot_source_ext"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    price: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    thumbnail_url: Mapped[str] = mapped_column(String(1024), nullable=True, default="")
+    product_url: Mapped[str] = mapped_column(String(2048), nullable=True, default="")
+    merchant_logo_url: Mapped[str] = mapped_column(String(1024), nullable=True, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

@@ -87,6 +87,8 @@ class UCYandexProvider(SearchProvider):
                 else (container.get_text(" ", strip=True) if container is not None else a.get_text(" ", strip=True))
             )
             price = _normalize_price(_first_price(price_text))  # noqa: F405
+            delivery_text = _extract_delivery_text(container.get_text(" ", strip=True) if container is not None else "")  # noqa: F405
+            delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
 
             img = (container.select_one("picture img") if container is not None else None) or (
                 container.select_one("img") if container is not None else None
@@ -105,6 +107,9 @@ class UCYandexProvider(SearchProvider):
                     merchant_name="market.yandex.ru",
                     merchant_logo_url="",
                     source="market.yandex.ru",
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:
@@ -214,6 +219,9 @@ class UCYandexProvider(SearchProvider):
                                                     merchant_name="market.yandex.ru",
                                                     merchant_logo_url="",
                                                     source="market.yandex.ru",
+                                                    delivery_text="",
+                                                    delivery_days_min=None,
+                                                    delivery_days_max=None,
                                                 )
                                             )
                         for v in obj.values():
@@ -256,6 +264,8 @@ class UCYandexProvider(SearchProvider):
                 container = container.parent
 
             price = _normalize_price(_first_price(container.get_text(" ", strip=True) if container else ""))  # noqa: F405
+            delivery_text = _extract_delivery_text(container.get_text(" ", strip=True) if container else "")  # noqa: F405
+            delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
             img = (container.select_one("img") if container else None) or a.select_one("img")
             thumb = _img_url(img)  # noqa: F405
 
@@ -271,6 +281,9 @@ class UCYandexProvider(SearchProvider):
                     merchant_name="market.yandex.ru",
                     merchant_logo_url="",
                     source="market.yandex.ru",
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:

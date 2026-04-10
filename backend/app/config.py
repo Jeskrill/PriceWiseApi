@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     dns_cookie: str = ""
     # Если нужно прогонять ВСЕ браузерные запросы через selenium_proxy_url — включи этот флаг.
     selenium_proxy_all: bool = False
+    # По умолчанию browser profile временный, чтобы контейнер не разрастался на гигабайты.
+    browser_profile_persistent: bool = False
+    # Базовая директория persistent-профилей, если они явно включены.
+    browser_profile_dir: str = ""
 
     # Читаем .env рядом с backend/, независимо от того, откуда запущен uvicorn.
     _backend_env = str(Path(__file__).resolve().parents[1] / ".env")
