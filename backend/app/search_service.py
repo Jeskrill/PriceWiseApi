@@ -2337,7 +2337,11 @@ async def find_cached_item(*, source: str, external_id: str) -> Optional[SearchI
 
 def _normalize_delivery_text(text: str) -> str:
     value = re.sub(r"\s+", " ", (text or "").strip())
-    return value[:80]
+    value = value[:80]
+    # Первая буква — всегда заглавная
+    if value:
+        value = value[0].upper() + value[1:]
+    return value
 
 
 def _delivery_days_from_text(text: str) -> tuple[Optional[int], Optional[int]]:
