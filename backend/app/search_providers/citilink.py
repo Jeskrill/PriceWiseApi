@@ -11,6 +11,10 @@ from app.search_providers.shared import *  # noqa: F403
 class HttpCitilinkProvider(SearchProvider):
     name = "citilink.ru"
 
+    default_delivery_text = "Доставка от 1 дня"
+    default_delivery_days_min = 1
+    default_delivery_days_max = 3
+
     async def search(self, query: str, limit: int) -> List[SearchItem]:
         url = f"https://www.citilink.ru/search/?text={quote(query)}"
         status, html, title, final_url, err = await _fetch_with_httpx_status(self.name, url)  # noqa: F405
@@ -31,7 +35,7 @@ class HttpCitilinkProvider(SearchProvider):
             html2, title2, final_url2, err2 = await _fetch_with_patchright(  # noqa: F405
                 f"{self.name}:browser",
                 url,
-                wait_css="a[data-meta-name='Snippet__title']",
+                wait_css="[data-meta-name='ProductVerticalSnippet'], [data-meta-name='Snippet__price']",
                 wait_seconds=12,
             )
             if not html2:
@@ -39,7 +43,7 @@ class HttpCitilinkProvider(SearchProvider):
                 html2, title2, final_url2, err2 = await _fetch_with_uc(  # noqa: F405
                     f"{self.name}:browser",
                     url,
-                    wait_css="a[data-meta-name='Snippet__title']",
+                    wait_css="[data-meta-name='ProductVerticalSnippet'], [data-meta-name='Snippet__price']",
                     wait_seconds=12,
                 )
             if html2:
@@ -83,14 +87,15 @@ class HttpCitilinkProvider(SearchProvider):
             if not product_url:
                 continue
 
-            # Найдём контейнер карточки, где живут цена/картинка.
+            # Нужен именно контейнер карточки, а не ближайший блок с картинкой:
+            # у Citilink цена живёт выше по дереву внутри ProductVerticalSnippet.
             container = a
-            for _ in range(10):
+            for _ in range(12):
                 if container is None:
                     break
                 if getattr(container, "name", None) and (
-                    container.select_one("yandex-pay-badge[amount]") is not None
-                    or container.find("img") is not None
+                    container.get("data-meta-name") in {"ProductVerticalSnippet", "SnippetProductVerticalLayout"}
+                    or container.select_one("[data-meta-name='Snippet__price']") is not None
                 ):
                     break
                 container = container.parent
@@ -101,14 +106,29 @@ class HttpCitilinkProvider(SearchProvider):
             if container:
                 price = self._extract_price(container)
 
+            if price <= 0 and container:
+                snippet_card = container.select_one("[data-meta-name='ProductVerticalSnippet']")
+                if snippet_card is not None:
+                    container = snippet_card
+                    price = self._extract_price(container)
+
             badge = container.select_one("yandex-pay-badge[amount]") if container else None
             if not price and badge and badge.get("amount"):
                 price = _normalize_price(_first_price(str(badge.get("amount"))))  # noqa: F405
+            if price <= 0:
+                continue
 
             thumb = ""
             if container:
                 img = container.select_one("picture img") or container.select_one("img")
                 thumb = _img_url(img)  # noqa: F405
+            delivery_text = _extract_delivery_text(container.get_text(" ", strip=True) if container else "")  # noqa: F405
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
 
             pid = ""
             m = re.search(r"-(\d+)/", product_url)
@@ -130,6 +150,9 @@ class HttpCitilinkProvider(SearchProvider):
                     merchant_name="citilink.ru",
                     merchant_logo_url="",
                     source="citilink.ru",
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:
@@ -139,6 +162,12 @@ class HttpCitilinkProvider(SearchProvider):
 
     def _extract_price(self, container) -> int:
         candidates: List[int] = []
+
+        snippet_price = container.select_one("[data-meta-name='Snippet__price']")
+        if snippet_price:
+            val = _normalize_price(_best_price_from_text(snippet_price.get_text(" ", strip=True)))  # noqa: F405
+            if val:
+                candidates.append(val)
 
         meta = container.select_one("meta[itemprop='price'][content]")
         if meta and meta.get("content"):

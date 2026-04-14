@@ -14,6 +14,12 @@ class HttpMvideoProvider(SearchProvider):
     image_base_url = "https://img.mvideo.ru"
     id_prefix = "mvideo"
 
+    # Дефолтная информация о доставке для крупных офлайн-ритейлеров
+    # (М.Видео / Эльдорадо — одна группа, стабильно доставляют за 1-2 дня в крупных городах)
+    default_delivery_text = "Доставка от 1 дня"
+    default_delivery_days_min = 1
+    default_delivery_days_max = 3
+
     async def search(self, query: str, limit: int) -> List[SearchItem]:
         # М.Видео — SPA, HTML выдачи часто «пустой». Быстрее/надёжнее ходить в их BFF API.
         client = await _get_http_client(_http_proxy_for(self.name))  # noqa: F405
@@ -26,8 +32,11 @@ class HttpMvideoProvider(SearchProvider):
         # 2) Цены (bulk)
         prices = await self._fetch_prices(client, product_ids)
 
-        # 3) Детали товара (по одному, но параллельно)
-        details = await self._fetch_details(client, product_ids)
+        # 3) Детали товара + статусы доставки (параллельно)
+        details, statuses = await asyncio.gather(
+            self._fetch_details(client, product_ids),
+            self._fetch_statuses(client, product_ids),
+        )
 
         items: List[SearchItem] = []
         for pid in product_ids:
@@ -35,6 +44,26 @@ class HttpMvideoProvider(SearchProvider):
             title = _clean_title(str(d.get("name") or ""))  # noqa: F405
             if not title:
                 continue
+
+            # Пробуем извлечь доставку из деталей товара
+            delivery_text = _extract_delivery_text_from_obj(d)  # noqa: F405
+            if not _looks_plausible_delivery_text(delivery_text):  # noqa: F405
+                delivery_text = ""
+
+            # Пробуем извлечь доставку из статуса товара
+            if not delivery_text:
+                s = statuses.get(pid) or {}
+                delivery_text = _extract_delivery_text_from_obj(s)  # noqa: F405
+                if not _looks_plausible_delivery_text(delivery_text):  # noqa: F405
+                    delivery_text = ""
+
+            # Если ни детали, ни статус не дали инфо о доставке — ставим дефолт
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
 
             name_translit = str(d.get("nameTranslit") or "").strip()
             product_url = f"{self.base_url}/products/{name_translit}-{pid}" if name_translit else ""
@@ -63,6 +92,9 @@ class HttpMvideoProvider(SearchProvider):
                     merchant_name=self.name,
                     merchant_logo_url="",
                     source=self.name,
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:
@@ -182,6 +214,36 @@ class HttpMvideoProvider(SearchProvider):
                 try:
                     resp = await client.get(
                         f"{self.base_url}/bff/product-details",
+                        params={"productId": pid},
+                        timeout=4.0,
+                    )
+                except Exception:
+                    return pid, None
+                if resp.status_code != 200:
+                    return pid, None
+                try:
+                    data = resp.json()
+                except Exception:
+                    return pid, None
+                body = data.get("body") if isinstance(data, dict) else None
+                return pid, body if isinstance(body, dict) else None
+
+        results = await asyncio.gather(*(job(pid) for pid in product_ids))
+        return {pid: body for pid, body in results if body}
+
+    async def _fetch_statuses(self, client: httpx.AsyncClient, product_ids: List[str]) -> dict[str, dict]:
+        """Запрашиваем /bff/product-details/status — там лежит информация о
+        доступности (самовывоз/доставка), которой нет в /bff/product-details."""
+        if not product_ids:
+            return {}
+
+        sem = asyncio.Semaphore(10)
+
+        async def job(pid: str) -> Tuple[str, Optional[dict]]:
+            async with sem:
+                try:
+                    resp = await client.get(
+                        f"{self.base_url}/bff/product-details/status",
                         params={"productId": pid},
                         timeout=4.0,
                     )

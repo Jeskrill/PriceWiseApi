@@ -11,6 +11,10 @@ from app.search_providers.shared import *  # noqa: F403
 class UCWildberriesProvider(SearchProvider):
     name = "wildberries.ru"
 
+    default_delivery_text = "Доставка от 1 дня"
+    default_delivery_days_min = 1
+    default_delivery_days_max = 3
+
     def __init__(self) -> None:
         self._last_api_status: Optional[int] = None
         self._last_api_debug: Optional[str] = None
@@ -107,7 +111,12 @@ class UCWildberriesProvider(SearchProvider):
             if price <= 0:
                 continue
             delivery_text = _extract_delivery_text_from_obj(p)  # noqa: F405
-            delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
 
             vol = pid // 100000
             part = pid // 1000
@@ -238,7 +247,12 @@ class UCWildberriesProvider(SearchProvider):
             if price <= 0 or price > 1_000_000:
                 continue
             delivery_text = _extract_delivery_text(card.get_text(" ", strip=True))  # noqa: F405
-            delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
 
             img = card.select_one("img")
             thumb = _img_url(img)  # noqa: F405

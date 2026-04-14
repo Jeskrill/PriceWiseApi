@@ -11,6 +11,10 @@ from app.search_providers.shared import *  # noqa: F403
 class HttpDnsProvider(SearchProvider):
     name = "dns-shop.ru"
     _CARD_SELECTOR = ".catalog-product, .catalog-product__root, [data-product-id], [data-id='product']"
+
+    default_delivery_text = "Доставка от 1 дня"
+    default_delivery_days_min = 1
+    default_delivery_days_max = 3
     _NAME_WAIT_SELECTOR = "a.catalog-product__name, a[href*='/product/'], [data-id='product']"
     _PRICE_WAIT_SELECTOR = ".product-buy__price, .product-buy__price-wrap, .catalog-product__buy > *, .catalog-product__buy"
 
@@ -134,6 +138,11 @@ class HttpDnsProvider(SearchProvider):
             limit=limit,
         )
         if ld:
+            for item in ld:
+                if not item.delivery_text:
+                    item.delivery_text = self.default_delivery_text
+                    item.delivery_days_min = self.default_delivery_days_min
+                    item.delivery_days_max = self.default_delivery_days_max
             return ld
 
         soup = BeautifulSoup(html, "html.parser")
@@ -166,6 +175,13 @@ class HttpDnsProvider(SearchProvider):
             price = _normalize_price(_first_price(price_text))  # noqa: F405
             if price <= 0 and not allow_unpriced:
                 continue
+            delivery_text = _extract_delivery_text(card.get_text(" ", strip=True))  # noqa: F405
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
 
             img = card.select_one("img")
             thumb = _img_url(img)  # noqa: F405
@@ -186,6 +202,9 @@ class HttpDnsProvider(SearchProvider):
                     merchant_name="dns-shop.ru",
                     merchant_logo_url="",
                     source="dns-shop.ru",
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:

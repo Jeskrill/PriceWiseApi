@@ -11,6 +11,10 @@ from app.search_providers.shared import *  # noqa: F403
 class UCOnlinetradeProvider(SearchProvider):
     name = "onlinetrade.ru"
 
+    default_delivery_text = "Доставка от 1 дня"
+    default_delivery_days_min = 1
+    default_delivery_days_max = 3
+
     async def search(self, query: str, limit: int) -> List[SearchItem]:
         if _cooldown_active(self.name):  # noqa: F405
             logger.warning(  # noqa: F405
@@ -107,6 +111,11 @@ class UCOnlinetradeProvider(SearchProvider):
             limit=limit,
         )
         if ld:
+            for item in ld:
+                if not item.delivery_text:
+                    item.delivery_text = self.default_delivery_text
+                    item.delivery_days_min = self.default_delivery_days_min
+                    item.delivery_days_max = self.default_delivery_days_max
             return ld
 
         soup = BeautifulSoup(html, "html.parser")
@@ -124,6 +133,13 @@ class UCOnlinetradeProvider(SearchProvider):
                 continue
 
             price = _normalize_price(_first_price(card.get_text(" ", strip=True)))  # noqa: F405
+            delivery_text = _extract_delivery_text(card.get_text(" ", strip=True))  # noqa: F405
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
             img = card.select_one("img")
             thumb = _img_url(img)  # noqa: F405
 
@@ -143,6 +159,9 @@ class UCOnlinetradeProvider(SearchProvider):
                     merchant_name="onlinetrade.ru",
                     merchant_logo_url="",
                     source="onlinetrade.ru",
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:

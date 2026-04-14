@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 import zlib
 
@@ -44,6 +45,8 @@ from .search_service import (
     find_cached_item,
     fetch_wb_popular,
     SearchFilterOptions,
+    _delivery_days_from_text,
+    _looks_plausible_delivery_text,
 )
 from .product_details import fetch_product_details
 from fastapi import HTTPException
@@ -84,6 +87,31 @@ def _user_delivery_context(user: Optional[models.User]) -> Optional[DeliveryCont
         city = (user.city or "").strip() or city
         region = (user.region or "").strip() or region
     return DeliveryContext(city=city, region=region)
+
+
+async def _enrich_items_delivery(items: list) -> None:
+    targets = [
+        item
+        for item in items
+        if not (item.delivery_text or "").strip() and (item.product_url or "").startswith(("http://", "https://"))
+    ]
+    if not targets:
+        return
+
+    sem = asyncio.Semaphore(6)
+
+    async def job(item) -> None:
+        async with sem:
+            try:
+                details = await fetch_product_details(item.product_url or "")
+            except Exception:
+                return
+            delivery_text = (details.delivery_text or "").strip()
+            if _looks_plausible_delivery_text(delivery_text):
+                item.delivery_text = delivery_text
+                item.delivery_days_min, item.delivery_days_max = _delivery_days_from_text(delivery_text)
+
+    await asyncio.gather(*(job(item) for item in targets))
 
 
 async def _dynamic_recommendations(
@@ -484,6 +512,7 @@ async def search_products(
         filters=filters,
         delivery_context=_user_delivery_context(user),
     )
+    await _enrich_items_delivery(items)
 
     if offset == 0:
         try:

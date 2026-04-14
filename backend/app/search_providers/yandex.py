@@ -13,6 +13,10 @@ from app.search_providers.shared import *  # noqa: F403
 class UCYandexProvider(SearchProvider):
     name = "market.yandex.ru"
 
+    default_delivery_text = "Доставка от 1 дня"
+    default_delivery_days_min = 1
+    default_delivery_days_max = 2
+
     async def search(self, query: str, limit: int) -> List[SearchItem]:
         url = f"https://market.yandex.ru/search?text={quote(query)}&page=1&rt=9&how={YANDEX_SORT}"  # noqa: F405
         status, html, title, final_url, err = await _fetch_with_httpx_status(self.name, url, timeout=5.0)  # noqa: F405
@@ -88,7 +92,12 @@ class UCYandexProvider(SearchProvider):
             )
             price = _normalize_price(_first_price(price_text))  # noqa: F405
             delivery_text = _extract_delivery_text(container.get_text(" ", strip=True) if container is not None else "")  # noqa: F405
-            delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
 
             img = (container.select_one("picture img") if container is not None else None) or (
                 container.select_one("img") if container is not None else None
@@ -219,9 +228,9 @@ class UCYandexProvider(SearchProvider):
                                                     merchant_name="market.yandex.ru",
                                                     merchant_logo_url="",
                                                     source="market.yandex.ru",
-                                                    delivery_text="",
-                                                    delivery_days_min=None,
-                                                    delivery_days_max=None,
+                                                    delivery_text=self.default_delivery_text,
+                                                    delivery_days_min=self.default_delivery_days_min,
+                                                    delivery_days_max=self.default_delivery_days_max,
                                                 )
                                             )
                         for v in obj.values():
@@ -265,7 +274,12 @@ class UCYandexProvider(SearchProvider):
 
             price = _normalize_price(_first_price(container.get_text(" ", strip=True) if container else ""))  # noqa: F405
             delivery_text = _extract_delivery_text(container.get_text(" ", strip=True) if container else "")  # noqa: F405
-            delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
             img = (container.select_one("img") if container else None) or a.select_one("img")
             thumb = _img_url(img)  # noqa: F405
 

@@ -11,6 +11,10 @@ from app.search_providers.shared import *  # noqa: F403
 class UCOzonProvider(SearchProvider):
     name = "ozon.ru"
 
+    default_delivery_text = "Доставка от 1 дня"
+    default_delivery_days_min = 1
+    default_delivery_days_max = 2
+
     async def search(self, query: str, limit: int) -> List[SearchItem]:
         url = f"https://www.ozon.ru/search/?text={quote(query)}"
         status, html, title, final_url, err = await _fetch_with_httpx_status(self.name, url, timeout=5.0)  # noqa: F405
@@ -65,6 +69,11 @@ class UCOzonProvider(SearchProvider):
             limit=limit,
         )
         if ld:
+            for item in ld:
+                if not item.delivery_text:
+                    item.delivery_text = self.default_delivery_text
+                    item.delivery_days_min = self.default_delivery_days_min
+                    item.delivery_days_max = self.default_delivery_days_max
             return ld
 
         soup = BeautifulSoup(html, "html.parser")
@@ -89,7 +98,27 @@ class UCOzonProvider(SearchProvider):
                     break
                 container = container.parent
 
-            price = _normalize_price(_first_price(container.get_text(" ", strip=True) if container else ""))  # noqa: F405
+            delivery_container = container
+            for _ in range(3):
+                if delivery_container is None:
+                    break
+                text = delivery_container.get_text(" ", strip=True)
+                if self._extract_delivery_text(text):
+                    break
+                delivery_container = delivery_container.parent
+
+            price = self._extract_price(container, a)
+            if price <= 0:
+                continue
+            delivery_text = self._extract_delivery_text(
+                delivery_container.get_text(" ", strip=True) if delivery_container else ""
+            )
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
             img = (container.select_one("img") if container else None) or a.select_one("img")
             thumb = _img_url(img)  # noqa: F405
 
@@ -109,9 +138,82 @@ class UCOzonProvider(SearchProvider):
                     merchant_name="ozon.ru",
                     merchant_logo_url="",
                     source="ozon.ru",
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:
                 break
 
         return items
+
+    @staticmethod
+    def _extract_delivery_text(text: str) -> str:
+        value = _extract_delivery_text(text)  # noqa: F405
+        if value:
+            return value
+
+        cleaned = _normalize_delivery_text(text)  # noqa: F405
+        if not cleaned:
+            return ""
+
+        patterns = (
+            r"за\s+\d+\s*(?:-|‑|–)?\s*час(?:а|ов)?",
+            r"за\s+час",
+            r"сегодня",
+            r"завтра",
+            r"послезавтра",
+            r"\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, cleaned, re.I)
+            if match:
+                return _normalize_delivery_text(match.group(0))  # noqa: F405
+
+        return ""
+
+    @staticmethod
+    def _extract_price(container, anchor) -> int:
+        candidates: list[int] = []
+
+        for root in [container, anchor]:
+            if root is None:
+                continue
+            for selector in (
+                "[data-price]",
+                "[data-price-value]",
+                "[data-meta-price]",
+                "meta[itemprop='price'][content]",
+            ):
+                for node in root.select(selector):
+                    raw = (
+                        node.get("content")
+                        or node.get("data-price")
+                        or node.get("data-price-value")
+                        or node.get("data-meta-price")
+                        or ""
+                    )
+                    value = _normalize_price(_first_price(str(raw)))  # noqa: F405
+                    if value > 0:
+                        candidates.append(value)
+
+            price_strings: list[str] = []
+            for text_node in root.find_all(string=lambda s: isinstance(s, str) and ("₽" in s or "руб" in s.lower())):
+                text = str(text_node).strip()
+                if text:
+                    price_strings.append(text)
+
+            joined = " ".join(price_strings)
+            if joined:
+                value = _normalize_price(_best_price_from_text(joined))  # noqa: F405
+                if value > 0:
+                    candidates.append(value)
+
+        if not candidates:
+            return 0
+
+        candidates = [value for value in candidates if 1000 <= value <= 1_000_000]
+        if not candidates:
+            return 0
+        return min(candidates)

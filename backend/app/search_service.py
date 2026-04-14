@@ -1265,6 +1265,8 @@ def _extract_citilink_from_next_data(html: str, limit: int) -> List[SearchItem]:
             price = _normalize_price(_first_price(str(price_raw)))
         if price <= 0:
             continue
+        delivery_text = _extract_delivery_text_from_obj(p)
+        delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)
 
         thumb = ""
         img = p.get("image") or p.get("img") or p.get("picture") or ""
@@ -1309,6 +1311,9 @@ def _extract_citilink_from_next_data(html: str, limit: int) -> List[SearchItem]:
                 merchant_name="citilink.ru",
                 merchant_logo_url="",
                 source="citilink.ru",
+                delivery_text=delivery_text,
+                delivery_days_min=delivery_days_min,
+                delivery_days_max=delivery_days_max,
             )
         )
         if len(items) >= limit:
@@ -2261,9 +2266,19 @@ class DeliveryContext:
     region: str
 
 
+_DELIVERY_MONTHS_RU = r"(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)"
+_DELIVERY_DATE_RU = rf"\d{{1,2}}(?:\.\d{{1,2}}|\s+{_DELIVERY_MONTHS_RU})"
+_DELIVERY_TEXT_DATE_RU = rf"\d{{1,2}}\s+{_DELIVERY_MONTHS_RU}"
+_DELIVERY_HOURS_RU = r"\d+\s*(?:-?х)?\s*(?:-|‑|–)?\s*час(?:а|ов)?"
 _DELIVERY_TEXT_RE = re.compile(
-    r"(сегодня или завтра|сегодня|завтра|послезавтра|до\s+\d+\s+дн(?:я|ей)|"
-    r"через\s+\d+\s+дн(?:я|ей)|от\s+\d+\s+дн(?:я|ей)(?:\s+до\s+\d+\s+дн(?:я|ей))?)",
+    rf"(самовывоз\s+(?:за|через)\s+\d+\s+минут(?:[уы])?|"
+    rf"забрать\s+в\s+магазине\s+(?:за|через)\s+\d+\s+минут(?:[уы])?|"
+    rf"самовывоз(?:\s+из\s+\d+\s+магазинов?)?\s+(?:сегодня(?:\s+и\s+позже)?|завтра(?:\s+и\s+позже)?|послезавтра|(?:c|с)\s+{_DELIVERY_DATE_RU}|начиная\s+с\s+{_DELIVERY_DATE_RU})|"
+    rf"(?:экспресс-?|срочная\s+)доставка\s+(?:от|за)\s+{_DELIVERY_HOURS_RU}|"
+    rf"доставка\s+(?:сегодня|завтра|послезавтра|позже|от\s+{_DELIVERY_HOURS_RU}|за\s+{_DELIVERY_HOURS_RU}|за\s+час|за\s+\d+\s+минут(?:[уы])?|(?:c|с)\s+{_DELIVERY_DATE_RU}|начиная\s+с\s+{_DELIVERY_DATE_RU})|"
+    rf"за\s+{_DELIVERY_HOURS_RU}|за\s+час|"
+    rf"сегодня или завтра|сегодня|завтра|послезавтра|{_DELIVERY_TEXT_DATE_RU}|"
+    rf"до\s+\d+\s+дн(?:я|ей)|через\s+\d+\s+дн(?:я|ей)|от\s+\d+\s+дн(?:я|ей)(?:\s+до\s+\d+\s+дн(?:я|ей))?)",
     re.I,
 )
 
@@ -2329,6 +2344,8 @@ def _delivery_days_from_text(text: str) -> tuple[Optional[int], Optional[int]]:
     value = _normalize_delivery_text(text).lower()
     if not value:
         return None, None
+    if "минут" in value or "час" in value:
+        return 0, 0
     if "сегодня или завтра" in value:
         return 0, 1
     if "послезавтра" in value:
@@ -2337,6 +2354,10 @@ def _delivery_days_from_text(text: str) -> tuple[Optional[int], Optional[int]]:
         return 0, 0
     if "завтра" in value:
         return 1, 1
+    if re.search(rf"(?:c|с|начиная\s+с)\s+{_DELIVERY_DATE_RU}", value):
+        return None, None
+    if re.search(rf"^{_DELIVERY_DATE_RU}$", value):
+        return None, None
 
     match = re.search(r"до\s+(\d+)\s+дн(?:я|ей)", value)
     if match:
@@ -2365,25 +2386,78 @@ def _extract_delivery_text(text: str) -> str:
     match = _DELIVERY_TEXT_RE.search(cleaned)
     if not match:
         return ""
-    return _normalize_delivery_text(match.group(1))
+    value = _normalize_delivery_text(match.group(1))
+    if not _looks_plausible_delivery_text(value):
+        return ""
+    return value
+
+
+def _looks_plausible_delivery_text(text: str) -> bool:
+    value = _normalize_delivery_text(text)
+    if not value:
+        return False
+    lowered = value.lower()
+    if re.fullmatch(r"\d+(?:[.,]\d+)?", lowered):
+        return False
+    if re.fullmatch(r"\d{1,2}[.,]\d{1,2}", lowered):
+        return False
+    if not re.search(r"[a-zа-яё]", lowered, re.I):
+        return False
+    if re.search(
+        r"(достав|самовывоз|получ|магазин|экспресс|pickup|deliver|ship|receive|today|tomorrow|"
+        r"сегодня|завтра|послезавтра|минут|час|дн)",
+        lowered,
+        re.I,
+    ):
+        return True
+    if re.fullmatch(rf"{_DELIVERY_TEXT_DATE_RU}", lowered, re.I):
+        return True
+    if re.fullmatch(rf"(?:c|с)\s+{_DELIVERY_DATE_RU}", lowered, re.I):
+        return True
+    if re.fullmatch(rf"начиная\s+с\s+{_DELIVERY_DATE_RU}", lowered, re.I):
+        return True
+    return False
 
 
 def _extract_delivery_text_from_obj(obj: object) -> str:
-    stack: list[object] = [obj]
+    hint_words = (
+        "delivery",
+        "deliver",
+        "pickup",
+        "receive",
+        "shipment",
+        "shipping",
+        "arrival",
+        "eta",
+        "courier",
+        "express",
+        "самовывоз",
+        "достав",
+        "получ",
+    )
+    stack: list[tuple[object, bool]] = [(obj, False)]
     while stack:
-        current = stack.pop()
+        current, hinted = stack.pop()
         if isinstance(current, str):
+            if not hinted and not re.search(
+                r"(достав|самовывоз|получ|экспресс|pickup|deliver|ship|receive|today|tomorrow|сегодня|завтра|послезавтра)",
+                current,
+                re.I,
+            ):
+                continue
             value = _extract_delivery_text(current)
-            if value:
+            if value and _looks_plausible_delivery_text(value):
                 return value
             continue
         if isinstance(current, dict):
-            for value in current.values():
-                stack.append(value)
+            for key, value in current.items():
+                key_text = str(key or "").lower()
+                child_hinted = hinted or any(word in key_text for word in hint_words)
+                stack.append((value, child_hinted))
             continue
         if isinstance(current, list):
             for value in current:
-                stack.append(value)
+                stack.append((value, hinted))
     return ""
 
 

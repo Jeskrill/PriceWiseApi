@@ -76,6 +76,12 @@ class HttpEldoradoProvider(HttpMvideoProvider):
         if ld:
             max_price = max((item.price for item in ld), default=0)
             if max_price >= 1000:
+                # JSON-LD не содержит информации о доставке — ставим дефолт
+                for item in ld:
+                    if not item.delivery_text:
+                        item.delivery_text = self.default_delivery_text
+                        item.delivery_days_min = self.default_delivery_days_min
+                        item.delivery_days_max = self.default_delivery_days_max
                 return ld
 
         soup = BeautifulSoup(html, "html.parser")
@@ -113,6 +119,13 @@ class HttpEldoradoProvider(HttpMvideoProvider):
             )
             if price <= 0 or price > 1_000_000:
                 continue
+            delivery_text = _extract_delivery_text(container.get_text(" ", strip=True) if container else "")  # noqa: F405
+            if delivery_text:
+                delivery_days_min, delivery_days_max = _delivery_days_from_text(delivery_text)  # noqa: F405
+            else:
+                delivery_text = self.default_delivery_text
+                delivery_days_min = self.default_delivery_days_min
+                delivery_days_max = self.default_delivery_days_max
 
             img = a.select_one("img") or (container.select_one("img") if container else None)
             thumb = _img_url(img)  # noqa: F405
@@ -133,6 +146,9 @@ class HttpEldoradoProvider(HttpMvideoProvider):
                     merchant_name=self.name,
                     merchant_logo_url="",
                     source=self.name,
+                    delivery_text=delivery_text,
+                    delivery_days_min=delivery_days_min,
+                    delivery_days_max=delivery_days_max,
                 )
             )
             if len(items) >= limit:
