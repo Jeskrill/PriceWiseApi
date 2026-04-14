@@ -2398,6 +2398,11 @@ def _normalize_filters(filters: Optional[SearchFilterOptions]) -> SearchFilterOp
         delivery = None
     price_min = filters.price_min if filters.price_min is not None and filters.price_min >= 0 else None
     price_max = filters.price_max if filters.price_max is not None and filters.price_max >= 0 else None
+    # Мобильный клиент часто шлёт 0/0 как «фильтр цены не выбран».
+    # Иначе это превращается в жёсткий фильтр "покажи только товары с ценой 0".
+    if price_min == 0 and price_max == 0:
+        price_min = None
+        price_max = None
     if price_min is not None and price_max is not None and price_min > price_max:
         price_min, price_max = price_max, price_min
     only_new = filters.only_new and not filters.only_used
