@@ -456,13 +456,19 @@ async def search_products(
     ),
     sort: str = Query(
         "price_asc",
-        description="Сортировка: price_asc | price_desc | relevance.",
+        description=(
+            "Сортировка: price_asc | price_desc | relevance. "
+            "Также принимает русские алиасы: Сначала дешевые, Сначала дорогие, По рейтингу и др."
+        ),
     ),
     price_min: Optional[int] = Query(None, ge=0, description="Минимальная цена"),
     price_max: Optional[int] = Query(None, ge=0, description="Максимальная цена"),
     delivery: Optional[str] = Query(
         None,
-        description="Фильтр доставки: today | today_tomorrow | up_to_7_days.",
+        description=(
+            "Фильтр доставки: today | today_tomorrow | up_to_7_days | up_to_14_days | exists. "
+            "Также принимает русские алиасы: Сегодня, Сегодня или завтра, До 7 дней, До 14 дней, Есть."
+        ),
     ),
     only_original: bool = Query(False, description="Только оригинальные товары (эвристика по источникам)."),
     only_new: bool = Query(False, description="Только новые товары (эвристика по источникам/названию)."),

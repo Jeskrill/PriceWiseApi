@@ -2465,14 +2465,40 @@ def _extract_delivery_text_from_obj(obj: object) -> str:
     return ""
 
 
+# Маппинг русских строк сортировки (из мобильного приложения) → внутренние значения.
+_SORT_ALIASES: dict[str, str] = {
+    "без сортировки": "price_asc",
+    "сначала дешевые": "price_asc",
+    "сначала дешёвые": "price_asc",
+    "сначала дорогие": "price_desc",
+    "по рейтингу": "relevance",
+    "по количеству отзывов": "relevance",
+}
+
+# Маппинг русских строк доставки (из мобильного приложения) → внутренние значения.
+_DELIVERY_ALIASES: dict[str, str] = {
+    "любая": "",
+    "сегодня": "today",
+    "сегодня или завтра": "today_tomorrow",
+    "до 7 дней": "up_to_7_days",
+    "до 14 дней": "up_to_14_days",
+    "есть": "exists",
+}
+
+_VALID_DELIVERY_VALUES = {"today", "today_tomorrow", "up_to_7_days", "up_to_14_days", "exists"}
+_VALID_SORT_VALUES = {"price_asc", "price_desc", "relevance"}
+
+
 def _normalize_filters(filters: Optional[SearchFilterOptions]) -> SearchFilterOptions:
     if filters is None:
         return SearchFilterOptions()
     sort = (filters.sort or "price_asc").strip().lower()
-    if sort not in {"price_asc", "price_desc", "relevance"}:
+    sort = _SORT_ALIASES.get(sort, sort)
+    if sort not in _VALID_SORT_VALUES:
         sort = "price_asc"
     delivery = (filters.delivery or "").strip().lower()
-    if delivery not in {"today", "today_tomorrow", "up_to_7_days"}:
+    delivery = _DELIVERY_ALIASES.get(delivery, delivery)
+    if delivery not in _VALID_DELIVERY_VALUES:
         delivery = None
     price_min = filters.price_min if filters.price_min is not None and filters.price_min >= 0 else None
     price_max = filters.price_max if filters.price_max is not None and filters.price_max >= 0 else None
@@ -2544,17 +2570,28 @@ def _apply_filters(items: List[SearchItem], filters: SearchFilterOptions) -> Lis
                         continue
                 elif item.source not in FAST_DELIVERY_SOURCES:
                     continue
-            if filters.delivery == "today_tomorrow":
+            elif filters.delivery == "today_tomorrow":
                 if max_days is not None:
                     if max_days > 1:
                         continue
                 elif item.source not in MEDIUM_DELIVERY_SOURCES:
                     continue
-            if filters.delivery == "up_to_7_days":
+            elif filters.delivery == "up_to_7_days":
                 if max_days is not None:
                     if max_days > 7:
                         continue
                 elif item.source in SLOW_DELIVERY_SOURCES:
+                    continue
+            elif filters.delivery == "up_to_14_days":
+                if max_days is not None:
+                    if max_days > 14:
+                        continue
+                elif item.source in SLOW_DELIVERY_SOURCES:
+                    continue
+            elif filters.delivery == "exists":
+                # «Есть доставка» — пропускаем товары без какой-либо информации
+                # о доставке из заведомо медленных источников.
+                if max_days is None and item.source in SLOW_DELIVERY_SOURCES:
                     continue
         filtered.append(item)
     return filtered
