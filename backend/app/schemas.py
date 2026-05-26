@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -194,3 +195,26 @@ class MerchantLogoUpdateRequest(BaseModel):
 
 class FavoritesResponse(BaseModel):
     items: list[FavoriteOut]
+
+
+class NotificationOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: int
+    type: str
+    source: str = ""
+    external_id: str = ""
+    title: str = ""
+    thumbnail_url: str = ""
+    product_url: str = ""
+    old_price: Optional[int] = None
+    new_price: Optional[int] = None
+    created_at: datetime
+
+
+class NotificationListResponse(BaseModel):
+    items: list[NotificationOut]
+
+
+class NotificationAckRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)

@@ -112,6 +112,25 @@ class SearchEvent(Base):
     user: Mapped[Optional[User]] = relationship("User")
 
 
+class NotificationEvent(Base):
+    __tablename__ = "notification_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    thumbnail_url: Mapped[str] = mapped_column(String(1024), nullable=True, default="")
+    product_url: Mapped[str] = mapped_column(String(2048), nullable=True, default="")
+    old_price: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    new_price: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship("User")
+
+
 class ProductSnapshot(Base):
     __tablename__ = "product_snapshots"
     __table_args__ = (UniqueConstraint("source", "external_id", name="uq_product_snapshot_source_ext"),)

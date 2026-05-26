@@ -3,12 +3,14 @@ from typing import Optional
 import zlib
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
 from .db import get_db
 from .repository import (
     FavoritesRepository,
     MainRepository,
+    NotificationsRepository,
     ProductSnapshotRepository,
     SearchAnalyticsRepository,
     UserRepository,
@@ -22,6 +24,9 @@ from .schemas import (
     FavoritesResponse,
     LoginRequest,
     MerchantLogoUpdateRequest,
+    NotificationAckRequest,
+    NotificationListResponse,
+    NotificationOut,
     PasswordChangeRequest,
     ProfileUpdateRequest,
     ProductDetailsResponse,
@@ -567,6 +572,45 @@ async def search_products(
         ProductSnapshotRepository(db).upsert_from_search(items=out)
     except Exception:
         pass
+
+    # Триггер уведомлений о падении цены: ищем все избранные товары
+    # (любых юзеров) по тем же (source, external_id), у которых сохранённая
+    # цена > актуальной. Для каждого создаём событие price_drop и обновляем
+    # цену в избранном, чтобы следующий поиск не плодил повторных пушей.
+    try:
+        price_map: dict[tuple[str, str], "SearchProductOut"] = {}
+        for it in out:
+            if it.price and it.price > 0:
+                price_map[(it.source, it.id)] = it
+        if price_map:
+            keys = list(price_map.keys())
+            favs = (
+                db.query(models.FavoriteProduct)
+                .filter(tuple_(models.FavoriteProduct.source, models.FavoriteProduct.external_id).in_(keys))
+                .all()
+            )
+            notif_repo = NotificationsRepository(db)
+            for fav in favs:
+                current = price_map.get((fav.source, fav.external_id))
+                if current is None:
+                    continue
+                if not fav.price or fav.price <= current.price:
+                    continue
+                notif_repo.create_price_drop(
+                    user_id=fav.user_id,
+                    source=current.source,
+                    external_id=current.id,
+                    title=current.title or fav.title,
+                    old_price=fav.price,
+                    new_price=current.price,
+                    thumbnail_url=current.thumbnail_url or fav.thumbnail_url or "",
+                    product_url=current.product_url or fav.product_url or "",
+                    commit=False,
+                )
+                fav.price = current.price
+            db.commit()
+    except Exception:
+        db.rollback()
     return SearchResponse(
         items=out,
         offset=offset,
@@ -798,6 +842,29 @@ def favorite_recommendation(
         merchant_logo_url=rec.merchant.logo_url or "",
     )
     return FavoriteOut.model_validate(fav)
+
+
+@router.get("/notifications", response_model=NotificationListResponse, tags=["notifications"])
+def list_notifications(
+    since: Optional[int] = Query(None, ge=0, description="Unix timestamp; вернёт события строго позже него"),
+    limit: int = Query(50, ge=1, le=200),
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    repo = NotificationsRepository(db)
+    items = repo.list_unread(user_id=user.id, since=since, limit=limit)
+    return NotificationListResponse(items=[NotificationOut.model_validate(i) for i in items])
+
+
+@router.post("/notifications/ack", tags=["notifications"])
+def ack_notifications(
+    req: NotificationAckRequest,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    repo = NotificationsRepository(db)
+    acked = repo.ack(user_id=user.id, ids=req.ids)
+    return {"acked": acked}
 
 
 @router.delete("/recommendations/{recommendation_id}/favorite", tags=["favorites"])

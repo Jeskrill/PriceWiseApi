@@ -115,6 +115,7 @@ class MainRepository:
         merchant_map = {m.name: m for m in existing_merchants}
 
         created = 0
+        updated = 0
         for source, src_items in by_source.items():
             merchant = merchant_map.get(source)
             if merchant is None:
@@ -146,6 +147,22 @@ class MainRepository:
                         .first()
                     )
                 if exists:
+                    changed = False
+                    if item.title and exists.title != item.title:
+                        exists.title = item.title
+                        changed = True
+                    if item.price and exists.price != item.price:
+                        exists.price = item.price
+                        changed = True
+                    if item.thumbnail_url and exists.thumbnail_url != item.thumbnail_url:
+                        exists.thumbnail_url = item.thumbnail_url
+                        changed = True
+                    if item.product_url and exists.product_url != item.product_url:
+                        exists.product_url = item.product_url
+                        changed = True
+                    if changed:
+                        updated += 1
+                    kept += 1
                     continue
 
                 rec = models.ProductRecommendation(
@@ -159,7 +176,7 @@ class MainRepository:
                 created += 1
                 kept += 1
 
-        if created:
+        if created or updated:
             self.db.commit()
         return created
 
@@ -467,3 +484,84 @@ class ProductSnapshotRepository:
             )
             .first()
         )
+
+
+class NotificationsRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def list_unread(
+        self,
+        *,
+        user_id: int,
+        since: Optional[int] = None,
+        limit: int = 50,
+    ) -> list[models.NotificationEvent]:
+        from datetime import datetime, timezone
+
+        query = (
+            self.db.query(models.NotificationEvent)
+            .filter(
+                models.NotificationEvent.user_id == user_id,
+                models.NotificationEvent.delivered_at.is_(None),
+            )
+        )
+        if since is not None and since > 0:
+            since_dt = datetime.fromtimestamp(since, tz=timezone.utc)
+            query = query.filter(models.NotificationEvent.created_at > since_dt)
+        return (
+            query.order_by(models.NotificationEvent.created_at.desc())
+            .limit(min(max(limit, 1), 200))
+            .all()
+        )
+
+    def ack(self, *, user_id: int, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        from datetime import datetime, timezone
+
+        updated = (
+            self.db.query(models.NotificationEvent)
+            .filter(
+                models.NotificationEvent.user_id == user_id,
+                models.NotificationEvent.id.in_(ids),
+                models.NotificationEvent.delivered_at.is_(None),
+            )
+            .update(
+                {models.NotificationEvent.delivered_at: datetime.now(timezone.utc)},
+                synchronize_session=False,
+            )
+        )
+        if updated:
+            self.db.commit()
+        return updated
+
+    def create_price_drop(
+        self,
+        *,
+        user_id: int,
+        source: str,
+        external_id: str,
+        title: str,
+        old_price: int,
+        new_price: int,
+        thumbnail_url: str = "",
+        product_url: str = "",
+        commit: bool = True,
+    ) -> models.NotificationEvent:
+        event = models.NotificationEvent(
+            user_id=user_id,
+            type="price_drop",
+            source=source,
+            external_id=external_id,
+            title=title or "",
+            thumbnail_url=thumbnail_url or "",
+            product_url=product_url or "",
+            old_price=old_price,
+            new_price=new_price,
+        )
+        self.db.add(event)
+        if commit:
+            self.db.commit()
+            self.db.refresh(event)
+        return event
