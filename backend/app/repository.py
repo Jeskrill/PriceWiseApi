@@ -103,6 +103,10 @@ class MainRepository:
         for item in items:
             if not item.source or not item.title or not item.price:
                 continue
+            # Не заводим рекомендацию без картинки — на главной такой товар
+            # выглядит «пустой плиткой». Лучше пропустить.
+            if not (getattr(item, "thumbnail_url", "") or "").strip():
+                continue
             by_source.setdefault(item.source, []).append(item)
 
         sources = list(by_source.keys())
