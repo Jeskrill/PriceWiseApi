@@ -37,7 +37,7 @@ class MainRepository:
         rows = (
             self.db.query(models.ProductRecommendation)
             .join(models.ProductRecommendation.merchant)
-            .order_by(models.ProductRecommendation.id)
+            .order_by(models.ProductRecommendation.id.desc())
             .offset(offset)
             .limit(limit + 1)
             .all()
@@ -57,7 +57,7 @@ class MainRepository:
         rows = (
             self.db.query(models.ProductRecommendation)
             .join(models.ProductRecommendation.merchant)
-            .order_by(models.ProductRecommendation.id)
+            .order_by(models.ProductRecommendation.id.desc())
             .all()
         )
         if not rows:
